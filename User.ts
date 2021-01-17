@@ -1,4 +1,4 @@
-import { Client, ENDPOINT } from './mod.ts'
+import { Client, ENDPOINT, TwitchPagination } from './mod.ts'
 
 /**
  * https://dev.twitch.tv/docs/api/reference#get-users
@@ -32,7 +32,7 @@ enum TwitchUserType {
 interface TwitchUsersFollowListResp {
     total: number
     data: TwitchUsersFollowerResp[]
-    pagination: { cursor: string }
+    pagination: TwitchPagination
 }
 interface TwitchUsersFollowerResp {
     from_id: string
@@ -121,7 +121,7 @@ export class User {
                     const chunk = await that._getFollowerChunk({ [`${relation}_id`]: that.id, after })
                     
                     // Update the cursor
-                    after = chunk.pagination.cursor
+                    after = chunk.pagination.cursor ?? ''
 
                     // ...and yield them
                     yield* chunk.data

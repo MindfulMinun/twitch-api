@@ -1,4 +1,6 @@
 import { User } from './User.ts'
+import { ServerRequest } from 'https://deno.land/std@0.83.0/http/server.ts'
+import { Webhook, WebhookEvent, WebhookEventCondition, WebhookResponse, WebhookStatus } from './Webhook.ts'
 
 export * from './Webhook.ts'
 export * from './User.ts'
@@ -16,9 +18,17 @@ interface LoginOptions {
     clientSecret: string
     /** Space-separated list of [scopes](https://dev.twitch.tv/docs/authentication/#scopes) */
     scopes?: string
+    /** Your webhook secret, used for verifying that messages come from Twitch */
+    webhookSecret?: string
+}
+
+export interface TwitchPagination {
+    cursor?: string
 }
 
 export const ENDPOINT = 'https://api.twitch.tv/helix/'
+
+const decoder = new TextDecoder()
 
 /**
  * Object for interacting with the Twitch API
@@ -30,15 +40,24 @@ export class Client {
     clientId: string
     /** Your client secret */
     #clientSecret: string
+    /** Your webhook secret, used for verifying that messages come from Twitch */
+    #webhookSecret?: string
     /** Space-separated list of [scopes](https://dev.twitch.tv/docs/authentication/#scopes) */
     scopes?: string
     /** Current access token */
     accessToken?: string
+    /** Keep track of the webhook message IDs in order to not respond to the same one twice */
+    #seenWebhooks: Set<string>
+
+    _webhookQ: AsyncQueue<any>
 
     constructor(loginOptions: LoginOptions) {
         this.clientId = loginOptions.clientId
         this.#clientSecret = loginOptions.clientSecret
         this.scopes = loginOptions.scopes || ''
+        this.#webhookSecret = loginOptions.webhookSecret || ''
+        this.#seenWebhooks = new Set()
+        this._webhookQ = new AsyncQueue()
     }
 
     async revalidationLoop() {
@@ -137,20 +156,165 @@ export class Client {
         }
     }
 
-    // getWebhooks(filters: {
-    //     status:
-    //         'enabled' |
-    //         'webhook_callback_verification_pending' |
-    //         'webhook_callback_verification_failed' |
-    //         'notification_failures_exceeded' |
-    //         'authorization_revoked' |
-    //     'user_removed',
-        
-    // }) {
-    //     let path = 'eventsub/subscriptions'
-    //     if (filters) {
-    //         path += '?'
-    //     }
-    //     return this.getJSON()
-    // }
+    /**
+     * Get an array of webhooks.
+     * Pass an optional object with a `status` property to filter by status, or an `id` to filter by webhook id
+     */
+    async getWebhooks(filters: { status?: WebhookStatus, id?: string } = {}) {
+        let path = 'eventsub/subscriptions'
+
+        if (filters.status || filters.id) path += '?'
+
+        path += [
+            filters.status && `status=${filters.status}`,
+            filters.id && `id=${filters.id}`
+        ].filter(auto => auto).join('&')
+
+        const resp: {
+            data: WebhookResponse[],
+            total: number,
+            limit: number,
+            pagination: TwitchPagination
+        } = await this.getJSON(path)
+
+        return resp.data.map(wr => new Webhook(this, wr))
+    }
+
+    async getWebhooksCount(filters: { status?: WebhookStatus } = {}) {
+        let path = 'eventsub/subscriptions'
+        if (filters.status) {
+            path += '?status=' + filters.status
+        }
+        const resp: {
+            data: WebhookResponse[],
+            total: number,
+            limit: number,
+            pagination: TwitchPagination
+        } = await this.getJSON(path)
+
+        return resp.total
+    }
+
+    async createWebhook(opts: {
+        type: WebhookEvent,
+        /** Callback URL. */
+        callabck: string,
+        /** An [event condition](https://dev.twitch.tv/docs/eventsub/eventsub-reference/#conditions) */
+        condition: WebhookEventCondition
+    }) {
+        if (!this.#webhookSecret) {
+            throw Error("A webhook secret wasn't provided, so messages from Twitch can't be verified.")
+        }
+        return Webhook.createWebhook(this, opts, this.#webhookSecret)
+    }
+
+    /**
+     * Handle a potential webhook message.
+     * If the message was identified as a message from Twitch, this function handles it
+     * and resolves to true, otherwise false.
+     * @example
+     * for await (const req of serve({ port: 80 })) {
+     *     // Respond to the request only if it came from Twitch
+     *     const guard = await api.handleWebhook(req)
+     *     // Do whatever you want if the message wasn't from Twitch
+     *     if (!guard) req.respond({ status: 400 })
+     * }
+     */
+    async handleWebhook(req: ServerRequest) {
+        if (!this.#webhookSecret) {
+            throw Error("A webhook secret wasn't provided, so messages from Twitch can't be verified.")
+        }
+
+        // Get some headers
+        const mId   = req.headers.get('Twitch-Eventsub-Message-Id')
+        const mType = req.headers.get('Twitch-Eventsub-Message-Type')
+        const mTime = req.headers.get('Twitch-Eventsub-Message-Timestamp')
+        const body = decoder.decode(await Deno.readAll(req.body))
+
+        // Expect all three headers to be present
+        if (!(mId && mType && mTime)) return false
+
+        // If we've seen this message before,
+        // let Twitch know we've already handled it
+        if (this.#seenWebhooks.has(mId)) {
+            req.respond({ status: 204 })
+            return true
+        }
+
+        // Refuse to handle messages that are older than 10 minutes
+        const isStillValid = +new Date() - +new Date(mTime) < 1000 * 60 * 10
+
+        // Verify that the message came from Twitch
+        const matchesExpectedSignature = Webhook.verifyMessage(
+            this.#webhookSecret,
+            mId + mTime + body
+        ) == req.headers.get('Twitch-Eventsub-Message-Signature')
+
+        if (!(isStillValid && matchesExpectedSignature)) {
+            req.respond({ status: 403 })
+            return true
+        }
+
+
+        // Now that we've verified that the message is valid
+        // we can properly handle the request
+        const json = JSON.parse(body)
+
+        switch (mType) {
+            case 'webhook_callback_verification':
+                // Respond to the challenge
+                req.respond({
+                    status: 200,
+                    body: json.challenge as string
+                })
+                return true
+            case 'notification': 
+                console.log('Switch')
+                this._webhookQ.push(json)
+                return true
+        }
+
+        return false
+    }
+}
+
+/** Helper class to handle events and turn them to async iterables */
+class AsyncQueue<T> {
+    // Whether 
+    #done: boolean
+    #items: T[]
+    #resolve: () => void
+    #promise: Promise<void>
+
+    constructor() {
+        this.#done = false
+        this.#items = []
+        this.#resolve = () => { }
+        this.#promise = new Promise(r => this.#resolve = r)
+        this._defer()
+    }
+    
+    _defer() {
+        this.#promise = new Promise(r => this.#resolve = r)
+    }
+    
+    async*[Symbol.asyncIterator]() {
+        while (!this.#done) {
+            await this.#promise
+            yield* this.#items.slice()
+        }
+    }
+
+    /** Add an item to the queue */
+    push(item: T) {
+        this.#items.push(item)
+        this.#resolve()
+        this._defer()
+    }
+
+    /** Stop iterating */
+    end() {
+        this.#done = true
+        this.#resolve()
+    }
 }

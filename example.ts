@@ -4,6 +4,7 @@ import * as Twitch from './mod.ts'
 const api = new Twitch.Client({
     clientId: Deno.env.get('TWITCH_CLIENT_ID') as string,
     clientSecret: Deno.env.get('TWITCH_SECRET') as string,
+    webhookSecret: Deno.env.get('TWITCH_WEBHOOK_SECRET') as string
 })
 
 await api.login()
@@ -21,5 +22,9 @@ for await (const stream of api.getStreams({ gameId: '509658', count: 5 })) {
 // Count how many channels a user is following
 const followerCount = await user.getFollowerCount('from')
 console.log(`${user.displayName} is following ${followerCount} channels`)
+
+const wh = await api.getWebhooks()
+
+console.log(wh)
 
 Deno.exit()

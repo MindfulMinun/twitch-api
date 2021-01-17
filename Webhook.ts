@@ -1,7 +1,7 @@
-import { serve } from 'https://deno.land/std@0.83.0/http/server.ts'
 import { Client } from './mod.ts'
+import { HmacSha256 } from 'https://deno.land/std@0.83.0/hash/sha256.ts'
 
-type WebhookEvent = 
+export type WebhookEvent = 
     "channel.update" |
     "channel.follow" |
     "channel.subscribe" |
@@ -21,45 +21,104 @@ type WebhookEvent =
     "user.authorization.revoke" |
     "user.update"
 
-interface WebhookParams {
-    event: WebhookEvent
+export type WebhookStatus =
+    'enabled' |
+    'webhook_callback_verification_pending' |
+    'webhook_callback_verification_failed' |
+    'notification_failures_exceeded' |
+    'authorization_revoked' |
+    'user_removed'
+
+export interface WebhookEventCondition {
+    /** The broadcaster user ID for the channel you want to get notifications for. */
+    'broadcaster_user_id'?: string
+    /** Specify a reward id to only receive notifications for a specific reward. */
+    'reward_id'?: string
+    /** Your application’s client id. The provided client_id must match the client id in the application access token. */
+    'client_id'?: string
+    /** The user ID for the user you want update notifications for. */
+    'user_id'?: string
+}
+
+interface WebhookTransport {
+    method: 'webhook'
+    callback: string
+}
+export interface WebhookResponse {
+    id: string
+    status: WebhookStatus
+    type: WebhookEvent
     condition: any
+    created_at: string
+    transport: WebhookTransport
 }
 
 export const EVENTSUB_VERSION = '1'
-
-const WEBHOOK_SECRET = 'i love div soup'
-
-export class Webhook {
+export class Webhook implements AsyncIterable<any> {
     #auto: Client
-    params: WebhookParams
-    constructor(auto: Client, params: WebhookParams) {
+    
+    id: string
+    status: WebhookStatus
+    type: WebhookEvent
+    condition: any
+    createdAt: Date
+    transport: WebhookTransport
+
+    constructor(auto: Client, response: WebhookResponse) {
         this.#auto = auto
-        this.params = params
+        this.id = response.id
+        this.status = response.status
+        this.type = response.type
+        this.createdAt = new Date(response.created_at)
+        this.transport = response.transport
     }
 
-    subscribe() {
-        return this.#auto.getJSON('eventsub/subscriptions', {
+    unsubscribe(webhookId = this.id) {
+        return this.#auto.fetch(`eventsub/subscriptions?id=${webhookId}`, {
+            method: 'DELETE'
+        })
+    }
+
+    async*[Symbol.asyncIterator]() {
+        for await (const event of this.#auto._webhookQ) {
+            console.log('In iterator')
+            if (event.subscription.id === this.id) yield event
+        }
+    }
+
+    static async createWebhook(
+        auto: Client,
+        opts: {
+            type: WebhookEvent,
+            /** Callback URL. */
+            callabck: string,
+            /** An [event condition](https://dev.twitch.tv/docs/eventsub/eventsub-reference/#conditions) */
+            condition: WebhookEventCondition
+        },
+        secret: string
+    ) {
+        const json = await auto.getJSON('eventsub/subscriptions', {
             method: 'POST',
             headers: {
                 'content-type': 'application/json'
             },
             body: JSON.stringify({
-                type: this.params.event,
+                type: opts.type,
                 version: EVENTSUB_VERSION,
-                condition: this.params.condition,
+                condition: opts.condition,
                 transport: {
                     method: 'webhook',
-                    callback: 'https://307f30b88e68.ngrok.io/',
-                    secret: WEBHOOK_SECRET
+                    callback: opts.callabck,
+                    secret
                 }
             })
         })
+        return new Webhook(auto, json.data[0])
     }
 
-    unsubscribe(webhookId?: string) {
-        return this.#auto.fetch(`eventsub/subscriptions?id=${webhookId}`, {
-            method: 'DELETE'
-        })
+    static verifyMessage(secret: string, body: string) {
+        const sha = new HmacSha256(secret)
+        sha.update(body)
+        return 'sha256=' + sha.hex()
     }
 }

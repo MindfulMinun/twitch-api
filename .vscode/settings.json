@@ -1,1 +1,4 @@
-{ "deno.enable": true }
+{
+    "deno.enable": true,
+    "discord.enabled": true
+}
