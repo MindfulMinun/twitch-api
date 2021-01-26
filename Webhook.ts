@@ -57,20 +57,25 @@ export const EVENTSUB_VERSION = '1'
 export class Webhook implements AsyncIterable<any> {
     #auto: Client
     
-    id: string
-    status: WebhookStatus
-    type: WebhookEvent
-    condition: any
-    createdAt: Date
-    transport: WebhookTransport
+    id!: string
+    status!: WebhookStatus
+    type!: WebhookEvent
+    condition!: any
+    createdAt!: Date
+    transport!: WebhookTransport
 
     constructor(auto: Client, response: WebhookResponse) {
         this.#auto = auto
-        this.id = response.id
-        this.status = response.status
-        this.type = response.type
-        this.createdAt = new Date(response.created_at)
-        this.transport = response.transport
+        this._updateOwnValuesFromResp(response)
+    }
+
+    _updateOwnValuesFromResp(sub: WebhookResponse) {
+        this.id = sub.id
+        this.status = sub.status
+        this.type = sub.type
+        this.condition = sub.condition
+        this.createdAt = new Date(sub.created_at)
+        this.transport = sub.transport
     }
 
     unsubscribe(webhookId = this.id) {
@@ -80,9 +85,11 @@ export class Webhook implements AsyncIterable<any> {
     }
 
     async*[Symbol.asyncIterator]() {
-        for await (const event of this.#auto._webhookQ) {
-            console.log('In iterator')
-            if (event.subscription.id === this.id) yield event
+        for await (const callback of this.#auto._webhookQ) {
+            if (callback.subscription.id === this.id) {
+                this._updateOwnValuesFromResp(callback.subscription as WebhookResponse)
+                if (callback.event) yield callback.event
+            }
         }
     }
 

@@ -268,9 +268,10 @@ export class Client {
                     body: json.challenge as string
                 })
                 return true
-            case 'notification': 
-                console.log('Switch')
+            case 'notification':
                 this._webhookQ.push(json)
+                this.#seenWebhooks.add(mId)
+                req.respond({ status: 200 })
                 return true
         }
 
@@ -278,19 +279,18 @@ export class Client {
     }
 }
 
-/** Helper class to handle events and turn them to async iterables */
+/** Helper class to handle events and turn them into async iterables */
 class AsyncQueue<T> {
-    // Whether 
     #done: boolean
     #items: T[]
     #resolve: () => void
+    // @ts-expect-error -- this._defer initializes this.#promise
     #promise: Promise<void>
 
     constructor() {
         this.#done = false
         this.#items = []
         this.#resolve = () => { }
-        this.#promise = new Promise(r => this.#resolve = r)
         this._defer()
     }
     
@@ -301,18 +301,19 @@ class AsyncQueue<T> {
     async*[Symbol.asyncIterator]() {
         while (!this.#done) {
             await this.#promise
-            yield* this.#items.slice()
+            yield* this.#items
+            this.#items = []
         }
     }
 
-    /** Add an item to the queue */
+    /** Add an item to the queue. Note that once an item is pushed, it cannot be removed. */
     push(item: T) {
         this.#items.push(item)
         this.#resolve()
         this._defer()
     }
 
-    /** Stop iterating */
+    /** Stops the iterator. Anything pushed to the queue after this is called won't be sent to the iterator. */
     end() {
         this.#done = true
         this.#resolve()
