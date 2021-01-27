@@ -232,14 +232,18 @@ export class Client {
      * }
      */
     async handleWebhook(req: ServerRequest): Promise<boolean> {
-        const r = await this.handleWebhookWithoutResponse(req)
-        if (!r) return false
-        req.respond(r)
+        const r = await this.handleWebhookInParts(req)
+        if (!r.response) return false
+        req.respond(r.response)
         return true
     }
 
     /** Handle a webhook without responding. This may be useful for something like Vercel where you want to perform a task before responding. */
-    async handleWebhookWithoutResponse(req: ServerRequest): Promise<Response | null> {
+    async handleWebhookInParts(req: ServerRequest): Promise<{
+        request: ServerRequest,
+        response: Response | null,
+        data: any
+    }> {
         if (!this.#webhookSecret) {
             throw Error("A webhook secret wasn't provided, so messages from Twitch can't be verified.")
         }
@@ -251,12 +255,20 @@ export class Client {
         const body = decoder.decode(await Deno.readAll(req.body))
 
         // Expect all three headers to be present
-        if (!(mId && mType && mTime)) return null
+        if (!(mId && mType && mTime)) return {
+            request: req,
+            response: null,
+            data: null
+        }
 
         // If we've seen this message before,
         // let Twitch know we've already handled it
         if (this.#seenWebhooks.has(mId)) {
-            return { status: 204 }
+            return {
+                request: req,
+                response: { status: 204 },
+                data: null
+            }
         }
 
         // Refuse to handle messages that are older than 10 minutes
@@ -269,7 +281,11 @@ export class Client {
         ) == req.headers.get('Twitch-Eventsub-Message-Signature')
 
         if (!(isStillValid && matchesExpectedSignature)) {
-            return { status: 403 }
+            return {
+                request: req,
+                response: { status: 403 },
+                data: null
+            }
         }
 
 
@@ -280,8 +296,12 @@ export class Client {
         switch (mType) {
             case 'webhook_callback_verification':
                 return {
-                    status: 200,
-                    body: json.challenge as string
+                    request: req,
+                    response: {
+                        status: 200,
+                        body: json.challenge as string
+                    },
+                    data: null
                 }
             case 'notification':
                 const notif = {
@@ -291,10 +311,14 @@ export class Client {
                 }
                 this._webhookQ.push(notif)
                 this.#seenWebhooks.add(mId)
-                return notif.response
+                return notif
         }
 
-        return null
+        return {
+            request: req,
+            response: null,
+            data: null
+        }
     }
 }
 
