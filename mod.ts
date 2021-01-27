@@ -1,5 +1,5 @@
 import { User } from './User.ts'
-import { ServerRequest } from 'https://deno.land/std@0.83.0/http/server.ts'
+import { ServerRequest, Response } from 'https://deno.land/std@0.83.0/http/server.ts'
 import { Webhook, WebhookEvent, WebhookEventCondition, WebhookResponse, WebhookStatus } from './Webhook.ts'
 
 export * from './Webhook.ts'
@@ -49,7 +49,11 @@ export class Client {
     /** Keep track of the webhook message IDs in order to not respond to the same one twice */
     #seenWebhooks: Set<string>
 
-    _webhookQ: AsyncQueue<any>
+    _webhookQ: AsyncQueue<{
+        request: ServerRequest,
+        response: Response
+        data: any
+    }>
 
     constructor(loginOptions: LoginOptions) {
         this.clientId = loginOptions.clientId
@@ -150,8 +154,15 @@ export class Client {
                     after = chunk.pagination.cursor
                     url.searchParams.set('after', after)
                     count += chunk.data.length
-                    yield* chunk.data.slice(0, max - count)
-                } while (after && count < max)
+
+                    if (max < count) {
+                        const left = max - count
+                        yield* chunk.data.slice(0, left)
+                    } else {
+                        yield* chunk.data
+                    }
+                    if (!after) break
+                } while (count < max)
             }
         }
     }
@@ -220,7 +231,15 @@ export class Client {
      *     if (!guard) req.respond({ status: 400 })
      * }
      */
-    async handleWebhook(req: ServerRequest) {
+    async handleWebhook(req: ServerRequest): Promise<boolean> {
+        const r = await this.handleWebhookWithoutResponse(req)
+        if (!r) return false
+        req.respond(r)
+        return true
+    }
+
+    /** Handle a webhook without responding. This may be useful for something like Vercel where you want to perform a task before responding. */
+    async handleWebhookWithoutResponse(req: ServerRequest): Promise<Response | null> {
         if (!this.#webhookSecret) {
             throw Error("A webhook secret wasn't provided, so messages from Twitch can't be verified.")
         }
@@ -232,13 +251,12 @@ export class Client {
         const body = decoder.decode(await Deno.readAll(req.body))
 
         // Expect all three headers to be present
-        if (!(mId && mType && mTime)) return false
+        if (!(mId && mType && mTime)) return null
 
         // If we've seen this message before,
         // let Twitch know we've already handled it
         if (this.#seenWebhooks.has(mId)) {
-            req.respond({ status: 204 })
-            return true
+            return { status: 204 }
         }
 
         // Refuse to handle messages that are older than 10 minutes
@@ -251,8 +269,7 @@ export class Client {
         ) == req.headers.get('Twitch-Eventsub-Message-Signature')
 
         if (!(isStillValid && matchesExpectedSignature)) {
-            req.respond({ status: 403 })
-            return true
+            return { status: 403 }
         }
 
 
@@ -262,20 +279,22 @@ export class Client {
 
         switch (mType) {
             case 'webhook_callback_verification':
-                // Respond to the challenge
-                req.respond({
+                return {
                     status: 200,
                     body: json.challenge as string
-                })
-                return true
+                }
             case 'notification':
-                this._webhookQ.push(json)
+                const notif = {
+                    request: req,
+                    response: { status: 200 },
+                    data: json
+                }
+                this._webhookQ.push(notif)
                 this.#seenWebhooks.add(mId)
-                req.respond({ status: 200 })
-                return true
+                return notif.response
         }
 
-        return false
+        return null
     }
 }
 

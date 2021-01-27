@@ -86,9 +86,10 @@ export class Webhook implements AsyncIterable<any> {
 
     async*[Symbol.asyncIterator]() {
         for await (const callback of this.#auto._webhookQ) {
-            if (callback.subscription.id === this.id) {
-                this._updateOwnValuesFromResp(callback.subscription as WebhookResponse)
-                if (callback.event) yield callback.event
+            const data = callback.data
+            if (data.subscription.id === this.id) {
+                this._updateOwnValuesFromResp(data.subscription as WebhookResponse)
+                if (data.event) yield callback
             }
         }
     }
@@ -120,6 +121,8 @@ export class Webhook implements AsyncIterable<any> {
                 }
             })
         })
+
+        if (json.error) return Promise.reject(json)
         return new Webhook(auto, json.data[0])
     }
 
